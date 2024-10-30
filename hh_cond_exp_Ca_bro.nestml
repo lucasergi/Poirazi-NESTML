@@ -1,0 +1,483 @@
+"""
+hh_cond_exp_traub - Hodgkin-Huxley model for Brette et al (2007) review
+#######################################################################
+
+Description
++++++++++++
+
+hh_cond_exp_traub is an implementation of a modified Hodgkin-Huxley model.
+
+This model was specifI_Ca_spinelly developed for a major review of simulators [1]_,
+based on a model of hippocampal pyramidal cells by Traub and Miles [2]_.
+The key differences between the current model and the model in [2]_ are:
+
+- This model is a point neuron, not a compartmental model.
+- This model includes only I_Na and I_K, with simpler I_K dynamics than
+  in [2]_, so it has only three instead of eight gating variables;
+  in particular, all Ca dynamics have been removed.
+- Incoming spikes induce an instantaneous conductance change followed by
+  exponential decay instead of activation over time.
+
+This model is primarily provided as reference implementation for hh_coba
+example of the Brette et al (2007) review. Default parameter values are chosen
+to match those used with NEST 1.9.10 when preparing data for [1]_. Code for all
+simulators covered is available from ModelDB [3]_.
+
+Note: In this model, a spike is emitted if :math:`V_spine >= V_T + 30` mV and
+:math:`V_spine` has fallen during the current time step.
+
+To avoid that this leads to multiple spikes during the falling flank of a
+spike, it is essential to choose a sufficiently long refractory period.
+Traub and Miles used :math:`t_{ref} = 3` ms [2, p 118], while we used
+:math:`t_{ref} = 2` ms in [2]_.
+
+References
+++++++++++
+
+.. [1] Brette R et al. (2007). Simulation of networks of spiking neurons: A
+       review of tools and strategies. Journal of Computational Neuroscience
+       23:349-98. DOI: https://doi.org/10.1007/s10827-007-0038-6
+.. [2] Traub RD and Miles R (1991). Neuronal networks of the hippocampus.
+       Cambridge University Press, Cambridge UK.
+.. [3] http://modeldb.yale.edu/83319
+
+
+See also
+++++++++
+
+hh_psc_alpha
+"""
+
+model hh_cond_exp_traub_neuron:
+    function f_soma(x real) real:
+        if x< e-4:
+            return 1-x/2
+        else :
+            return x/(exp(x)+1)
+    function heaviside(f real, f_0 real) real:
+        if f< f_0:
+            return 0
+        else :
+            return f
+    state:
+        V_spine mV = -70.0 mV     #  Membrane potential
+        V_spine_old mV = E_L     #  Membrane potential at previous timestep
+        refr_t ms = 0 ms    # Refractory period timer
+        is_refractory boolean = false
+
+        Act_m real = alpha_m_init / ( alpha_m_init + beta_m_init )
+        Act_h real = alpha_h_init / ( alpha_h_init + beta_h_init )
+        Inact_n real = alpha_n_init / ( alpha_n_init + beta_n_init )
+        
+        # our implementation, negative current indicate influx of ions
+        m_ca_soma real =0.0
+        V_low mV = -40 mV
+        I_Ca_soma uA = 0.0 uA                                   # Current in soma compartment
+        I_Ca_spine_NMDA uA  = 0.0 uA                            # Calcium current due to opening of NMDA receptors
+        I_syn_spine_NMDA uA = 0.0 uA
+        Ca_spine real = 0.001                                   # Total calcium concentration in the spine compartment
+        Ca_spine1 real = 0.07
+        Ca_soma real = 0.05                                     # Total calcium concentration in the soma compartment
+    	h_ca_sp real = 1.0                                      # Inactivation variable, calcium dynamics sp 
+        m_ca_sp real = 0.0                                      # Activation variable, calcium dynamics sp
+        I_Ca_spine uA  = 0.0 uA                                 # VGCCs current spine compartment
+        I_Ca_spine_NMDA1 uA = 0.0 uA
+        # inputs from the excitatory conductance
+        g_nmda_fast real = 0
+        g_nmda_slow real = 0
+
+
+        # Sodium channel spine
+        I_Na_spine uA = 0.0 uA
+        #m_na_sp real = 0.0
+        m_na_sp real = 1. / (1. + exp(-(E_L+40. mV)/3mV))                                   #activation function for sodium channel
+        #h_na_sp real = 0.0
+        h_na_sp real = 1. / (1. + exp((E_L+45.0 mV)/(3 mV)))                               #inactivation function for sodium channel
+        #s_na_sp real = 1.0                                                               #another inactivation function for sodium channel
+        s_na_sp real =((1. + Na_att* exp((E_L+60.0 mV)/(2 mV)))) / (1. + exp((E_L+60.0 mV)/(2 mV)))
+
+
+
+
+
+        tau_s_na_sp ms = 0.0 ms
+        Q 1/mV = 0.0 /mV
+
+        # Sodium channel spine
+        I_Na_soma uA = 0.0 uA
+        #I_Na_soma real = 0.0
+        m_na_soma real = 0.0                                      #activation function for sodium channel
+        h_na_soma real = 1.0                                      #inactivation function for sodium channel
+        s_na_soma real = 1.0                                      #another inactivation function for sodium channel
+
+        #potassium channel
+        m_kdr_sp real = 1. / (1. + exp(-(E_L+42. mV)/2mV))    #activation function for potassium channel
+        I_Kdr_spine uA = -g_kdr_sp*(1. / (1. + exp(-(E_L+42. mV)/2mV)))*(1. / (1. + exp(-(E_L+42. mV)/2mV)))*(E_L - E_kdr_sp)
+        # I_A channel
+        I_A_spine uA = 0.0 uA
+        h_a_sp real = 1.0                                     #inactivation function for I_A potassium channel
+        m_a_sp real = 0.0                                       #activation function for I_A potassium channel
+    
+        # I_mAHP channel
+        I_mAHP_spine uA = 0.0 uA
+        g_mAHP_sp uA/mV =  0.01 uA/mV
+        E_mAHP_sp mV = 77.0 mV
+        m_mAHP_sp real = 0.5
+
+        # I leak
+        I_leak uA = 0.0 uA
+
+        #m_inf_kdr real  = 1. / (1. + exp(-(V_spine+42. mV)/2mV))
+        h_na_sp_prova real = 1. / (1. + exp((E_L+45.0 mV)/(3 mV)))   
+        m_na_sp_prova real = 1. / (1. + exp(-(E_L+40. mV)/3 mV))
+        m_kdr_prova real = 1. / (1. + exp(-(E_L+42. mV)/2mV)) 
+
+    equations:
+        # synapses: exponential conductance
+        #>> kernel g_inh = exp(-t/tau_syn_inh)
+
+        # new implementation
+        kernel h_nmda_kernel = exp(-t/tau_nmda_rise)
+        kernel h_nmda_kernel_current = exp(-t/tau_nmda_rise)
+
+        recordable inline exc_current pA = convolve(h_nmda_kernel_current, exc_spikes)*pA + I_e 
+        recordable inline h_nmda real = convolve(h_nmda_kernel, exc_spikes)
+        g_nmda_fast' = -g_nmda_fast / tau_nmda_fast + h_nmda_fast_const*h_nmda # g_nmda_fast_const*h_nmda
+        g_nmda_slow' = -g_nmda_slow / tau_nmda_slow + h_nmda_slow_const*h_nmda # g_nmda_slow_const*h_nmda
+        recordable inline g_nmda real = alpha_nmda*g_nmda_fast + (1.0 - alpha_nmda)*g_nmda_slow
+
+        # Add aliases to simplify the equation definition of V_spine
+        recordable inline I_syn_exc pA = g_nmda * nS * ( V_spine - E_exc )
+	
+
+      
+        #Differential equation for soma commpartment
+
+
+        ######################## OUR MODEL ##################################
+        
+        
+        #magnesium block equation
+        inline m_ca_NMDA_sp real = 1.0 / (1.0 + 0.3 * Mg_ca *exp((-0.124 * V_spine)/mV))
+        #inline m_ca_NMDA_sp real = 1.0 / (1.0 + 0.3 * Mg_ca *exp((-0.124 * -70.6)/mV))
+        inline m_syn_NMDA_sp real = 1.0 / (1.0 + 0.3 * Mg_ca *exp((-0.062 * V_spine)/mV))
+
+        #differential equation for calcium concentration in the spine compartment
+        Ca_spine' = phi *(I_Ca_spine+I_Ca_spine_NMDA) /A_tot- beta_spine * (Ca_spine- Ca_0_spine) - (beta_spine / n_buff) * Ca_spine* Ca_spine- beta_buff* Ca_spine
+        #Ca_spine1' = phi *(I_Ca_spine+I_Ca_spine_NMDA1) /A_tot- beta_spine * (Ca_spine1- Ca_0_spine) - (beta_spine / n_buff) * Ca_spine1* Ca_spine1- beta_buff* Ca_spine1
+
+        #differential equation for calcium concentration in the soma compartment
+        #Ca_soma' = phi_s * I_Ca_soma- beta_soma *(Ca_soma-Ca_soma_0) + (Ca_spine-Ca_soma)/d - beta_soma/n_buff*Ca_soma*Ca_soma
+        #f_act'  =   k_poly * Ca_tot* Ca_tot/ (0.5 + Ca_tot* Ca_tot ) - k_depoly *0.1  * f_act
+        #h' = -h/ tau_rise + h_0 * heaviside(f_act,f_0) *(f_act -f_0)
+        #phro' = -phro/ tau_decay + h
+
+
+        inline m_inf_kdr real  = 1. / (1. + exp(-(V_spine+42. mV)/2mV))
+        m_kdr_prova' = (m_inf_kdr-m_kdr_prova)/tau_m_kdr_sp
+
+        # delay rectifier potassium current
+        inline I_Kdr_spine1 uA= -g_kdr_sp1*m_kdr_prova*m_kdr_prova*(V_spine - E_kdr_sp)
+
+        inline m_inf_na real= (1. / (1. + exp(-(V_spine+40. mV)/3mV)))
+        # analitical solution for sodium activation variable, spine commpartment
+        m_na_sp_prova' = (m_inf_na-m_na_sp_prova)/tau_m_na_sp
+
+        # analitical solution for sodium inactivation variables, spine commpartment
+        inline h_na_sp_inf real = (1. / (1. + exp((V_spine+45.0 mV)/(3 mV))))
+        h_na_sp_prova' = (h_na_sp_inf-h_na_sp_prova)/tau_h_na_sp 
+
+        inline I_NA_sp1 uA =-g_na_sp1*m_na_sp_prova*m_na_sp_prova*h_na_sp_prova*(V_spine - E_na_sp)
+        inline numero real = 2.0
+
+        #ghk real = -0.055 * (V + 27.01 mV) / ((exp(-(V_spine + 27.01 mV) / 3.8 mV) - 1) mV)
+        #V_spine'= -(V_spine + numero*V_spine)/ms
+        #V_spine' = -g_na_sp1*m_na_sp_prova*m_na_sp_prova*h_na_sp_prova*(V_spine - E_na_sp)/C_m1 +I_e/C_m
+        #V_spine' = +I_e/C_m
+
+        #V_spine' = -g_kdr_sp1*m_kdr_prova*m_kdr_prova*(V_spine - E_kdr_sp)/C_m1 +I_e/C_m
+        #V_spine' = (I_Kdr_spine1+ I_NA_sp1 + I_e)/C_m1
+        V_spine' = (-g_kdr_sp1*m_kdr_prova*m_kdr_prova*(V_spine - E_kdr_sp)-g_na_sp1*m_na_sp_prova*m_na_sp_prova*h_na_sp_prova*(V_spine - E_na_sp)-g_leak1*(V_spine-E_leak))/C_m1 +I_e/C_m
+
+    parameters:
+        C_m1 ms*uA/(mV) = 1.0 ms*uA/(mV)
+        E_leak mV = -70.0 mV
+        g_leak pF/ms = 0.1 pF/ms
+        g_leak1 uA/mV = 0.1 uA/mV
+        I_e pA = 0.05*50.0 pA 
+        g_Na nS = 20000 nS        # Na Conductance
+        g_K nS = 6000 nS          # K Conductance
+        g_L nS = 10 mS            # Leak Conductance
+        C_m pF = 1 pF             # Membrane Capacitance
+        E_Na mV = 50 mV           # Reversal potentials
+        E_K mV = -90 mV           # Potassium reversal potential
+        #E_L mV = -70 mV          # Leak reversal potential (aka resting potential)
+        E_L mV = -70.0 mV         # Leak reversal potential (aka resting potential)
+        V_T mV = -63 mV           # Voltage offset that controls dynamics. For default
+                                  # parameters, V_T = -63 mV results in a threshold around -50 mV.
+        tau_syn_exc ms = 25 ms    # Synaptic time constant of excitatory synapse
+        tau_syn_inh ms = 10 ms    # Sycmnaptic time constant of inhibitory synapse
+        refr_T ms = 2 ms          # Duration of refractory period
+        E_exc mV = 0 mV           # Excitatory synaptic reversal potential
+        E_inh mV = -80 mV         # Inhibitory synaptic reversal potential
+        
+        
+        alpha_n_init 1/ms = 0.032/(ms* mV ) * ( 15. mV - E_L) / ( exp( ( 15. mV - E_L) / 5. mV ) - 1. )
+        beta_n_init 1/ms = 0.5 /ms * exp( ( 10. mV - E_L ) / 40. mV )
+        alpha_m_init 1/ms = 0.32/(ms* mV ) * ( 13. mV - E_L) / ( exp( ( 13. mV - E_L) / 4. mV ) - 1. )
+        beta_m_init 1/ms = 0.28/(ms* mV ) * ( E_L  - 40. mV ) / ( exp( ( E_L - 40. mV ) / 5. mV ) - 1. )
+        alpha_h_init 1/ms = 0.128/ms * exp( ( 17. mV - E_L) / 18. mV )
+        beta_h_init 1/ms = ( 4. / ( 1. + exp( ( 40. mV - E_L ) / 5. mV) ) ) / ms
+
+        ################################ OUR MODEL ############################
+
+        #factin and phro equations constants
+        k_poly 1/ms  = 1/ms                             #polimerization constant f-actin
+        k_depoly 1/ms = 1 /ms                           #depolimerization constant f-actin
+        tau_decay ms = 50 ms                            #decay time beta function
+        tau_rise ms = 10 ms                             #rise time beta function
+        f_0 real = 0.1                                  #threshold on f-actin concentrion
+        h_0 real= 30                                    #constant for beta function differential equation
+
+
+        
+        
+        ############### our model ##################
+
+        #spine compartment constants
+
+        #calcium constants
+        A_tot cm*cm  = 2.0e-4 cm*cm                     # total area dendritic compartment
+        tau_m_sp ms = 3.6 ms                            # time constant for activation variable
+        tau_h_sp ms = 29 ms                             # time constant for inactivation variable
+        E_ca_sp mV = 140.0 mV                           # reversal potential calcium, useful for I_Ca_spine
+        Mg_ca real = 2.0    
+        gcalbar_sp uA/mV=  0.0000316 uA/mV
+        #magnesium concentration
+        #gcalbar_sp uA/mV= A_tot *  25 uA/mV / (cm*cm)   # conductance for I_Ca_spine
+        Ca_0_spine real = 0.07                          # initial calcium concentration
+        n_buff real = 6.0                               # strength of non-linear calcium buffering
+        beta_buff 1 / ms = 0.0/ ms                      # constant for linear buffering term
+        phi cm*cm/ (uA*ms) = 0.01 cm*cm/ (uA*ms)        # conversion factor : current to concentration
+        
+        
+        
+        #NMDA 
+        E_Ca_NMDA mV = 140 mV                           # reversal potential calcium, NMDA
+        #g_Ca_NMDA mS = A_tot *  25 uA/mV / (cm*cm)      # conductance for NMDA current
+        g_Ca_NMDA uA/mV = 25.0 uA/mV
+        beta_spine 1 / ms = 0.083 / ms                  # time constant for calcium concentration decay
+        g_syn_NMDA pF/ms = 0.3 pF/ms
+        g_syn_NMDA1 uA/mV = 0.3 uA/mV
+        E_syn_NMDA mV = 0.0 mV
+        # sodium constants spine
+        g_na_sp pF/ms=  7.0 pF/ms #rubin
+        g_na_sp1 uA/mV=  7.0 uA/mV #rubin
+        E_na_sp mV = 60.0 mV
+        tau_m_na_sp ms = 0.05 ms
+        tau_h_na_sp ms = 0.5 ms
+        Faraday C = 9.648e4 C
+        R J/K = 8.315 J/K 
+        temp K = 273.15 K + 34.0 K
+        Na_att real = 1.0 
+
+        # sodium constants somatic
+        tau_m_na_soma ms = 0.05 ms
+        tau_h_na_soma ms = 1.0 ms
+        
+
+        # Kdr constants
+        E_kdr_sp mV = -77.0 mV
+        g_kdr_sp pF/ms = 0.867 pF/ms   #rubin
+        g_kdr_sp1 uA/mV = 0.867 uA/mV   #rubin
+        tau_m_kdr_sp ms = 2.2 ms
+
+        # Kdr constants
+        E_a_sp mV = -77.0 mV
+        gcalbar_a_sp uA/mV = 0.0075 uA/mV
+        
+
+
+
+
+        phi_s 1/ms = 20.0 /ms
+        tau_nmda_rise ms = 2.0 ms    # Rise time for NMDA channels
+        tau_nmda_fast ms = 10.0 ms   # Fast decay time for NMDA channels
+        tau_nmda_slow ms = 45.0 ms   # Slow decay time for NMDA channels
+        alpha_nmda real = 0.527      # ratio of fast decay NMDA conducance over total NMDA conductance 
+        h_nmda_fast_const 1/ ms = (tau_nmda_fast - tau_nmda_rise) / (tau_nmda_fast * tau_nmda_rise)
+        h_nmda_slow_const 1 / ms = (tau_nmda_slow - tau_nmda_rise) / (tau_nmda_slow * tau_nmda_rise)
+        
+        #soma compartment constants
+        g_CaL_s uA/mV = 7.0 uA/mV                       # mS/cm^2
+        ca_out real = 2.0                               # mM, typical extracellular Ca++ concentration
+        beta_soma 1/ms = 0.083/ms                       # decay constant for calcium concentration on soma compartment
+        Ca_soma_0 real = 0.05                           # initial concentration of calcium in the soma
+        d ms = 1.0 ms                                   # time constant for diffusion from soma to dendritic compartment
+        tau_m_soma ms = 100.0 ms                        # time constant for activation variable
+    
+    
+    
+    
+    
+    
+    input:
+        inh_spikes <- inhibitory spike
+        exc_spikes <- excitatory spike
+
+    output:
+        spike
+
+    update:
+        # Hodgkin-Huxley type model: ODEs are always integrated, regardless of refractory state
+        V_spine_old = V_spine
+      
+
+        ############ Leak current ###########
+        I_leak = -g_leak1 * (V_spine-E_leak)
+
+
+        
+        # analitical solution for activation variable, soma commpartment
+        #m_ca_soma = m_ca_soma + (1. - exp(-(timestep())/tau_m_soma))*(1. / (1. + exp(-(V_spine+37. mV)/mV)) - m_ca_soma)
+
+        # analitical solution for calcium activation variable, spine commpartment
+        #m_ca_sp = m_ca_sp + (1. - exp(-(timestep())/tau_m_sp))*(1. / (1. + exp(-(V_low+37. mV)/mV)) - m_ca_sp)
+        m_ca_sp = m_ca_sp + (1. - exp(-(timestep())/tau_m_sp))*(1. / (1. + exp(-(V_spine+37. mV)/mV)) - m_ca_sp)
+
+        # analitical solution for calcium inactivation variable, spine commpartment
+        #h_ca_sp = h_ca_sp + (1. - exp(-(timestep())/tau_h_sp))*(1. / (1. + exp((V_low+41. mV)/(0.5 mV))) - h_ca_sp)
+        h_ca_sp = h_ca_sp + (1. - exp(-(timestep())/tau_h_sp))*(1. / (1. + exp((V_spine+41. mV)/(0.5 mV))) - h_ca_sp)
+
+        # equation for Ca2+ VGCCs current, spine compartment
+        #I_Ca_spine = -gcalbar_sp*m_ca_sp*m_ca_sp*m_ca_sp*h_ca_sp*(V_low - E_ca_sp) 
+        I_Ca_spine = -gcalbar_sp*m_ca_sp*m_ca_sp*m_ca_sp*h_ca_sp*(V_spine - E_ca_sp) 
+
+        
+        
+        
+        
+        ############# SODIUM CHANNEL #############
+        #Q 1/mV =  Faraday/ (R *  temp) 
+        Q 1/mV = 39.04 /mV
+        #print("Valore di Q: {Q}")
+        tau_s_na_sp ms = (0.00333)*exp(0.0024*Q*(V_spine+60 mV)) / (1+exp(0.0012*Q*(V_spine + 60 mV)))*ms
+
+        # analitical solution for sodium activation variable, spine commpartment
+        m_na_sp = m_na_sp + (1. - exp(-(timestep())/tau_m_na_sp))*(1. / (1. + exp(-(V_spine+40. mV)/3mV)) - m_na_sp)
+
+        # analitical solution for sodium inactivation variables, spine commpartment
+        h_na_sp = h_na_sp + (1. - exp(-(timestep())/tau_h_na_sp))*(1. / (1. + exp((V_spine+45.0 mV)/(3 mV))) - h_na_sp)
+        #s_na_sp = s_na_sp + (1. - exp(-(timestep())/tau_s_na_sp))*((1+exp(V_spine+60.0 mV)/(2 mV)) / (1. + exp((V_spine+60.0 mV)/(2 mV))) - s_na_sp)
+        s_na_sp = s_na_sp + (1. - exp(-(timestep())/tau_s_na_sp))*(((1. + Na_att* exp((V_spine+60.0 mV)/(2 mV)))) / (1. + exp((V_spine+60.0 mV)/(2 mV))) - s_na_sp)
+
+
+        # sodium equation, spine compartment
+        #I_Na_spine = -g_na_sp*m_na_sp*m_na_sp*h_na_sp*s_na_sp*(V_spine - E_na_sp)
+        I_Na_spine = -g_na_sp1*m_na_sp*m_na_sp*h_na_sp*s_na_sp*(V_spine - E_na_sp) #per confronto
+
+
+        ############# SODIUM CHANNEL SOMATIC #############
+        tau_s_na_soma ms = (0.00333)*exp(0.0024*Q*(V_spine+60 mV)) / (1+exp(0.0012*Q*(V_spine + 60 mV)))*ms
+        I_Na_soma = -g_na_sp*m_na_soma*m_na_soma*h_na_soma*s_na_soma*(V_spine - E_na_sp+10.0 mV) #modified
+
+        # analitical solution for sodium activation variable, spine commpartment
+        m_na_soma = m_na_soma + (1. - exp(-(timestep())/tau_m_na_soma))*(1.0 / (1.0 + exp(-(V_spine+44.0 mV)/3.0 mV)) - m_na_soma)
+        
+        # analitical solution for sodium inactivation variables, spine commpartment
+        h_na_soma = h_na_soma + (1. - exp(-(timestep())/tau_h_na_soma))*(1. / (1. + exp((V_spine+49.0 mV)/(3.5 mV))) - h_na_soma)
+        #s_na_sp = s_na_sp + (1. - exp(-(timestep())/tau_s_na_soma))*((1+exp(V_spine+60.0 mV)/(2 mV)) / (1. + exp((V_spine+60.0 mV)/(2 mV))) - s_na_sp)
+        s_na_soma = s_na_soma + (1. - exp(-(timestep())/tau_s_na_soma))*(((1. + Na_att* exp((V_spine+60.0 mV)/(2 mV)))) / (1. + exp((V_spine+60.0 mV)/(2 mV))) - s_na_soma)
+
+
+        # sodium equation, spine compartment
+        I_Na_soma = -g_na_sp*m_na_soma*m_na_soma*h_na_soma*s_na_soma*(V_spine - E_na_sp)
+        #I_Na_soma = -m_na_soma*m_na_soma*h_na_soma*s_na_soma*(V_spine - E_na_sp) /mV
+
+
+
+
+        ################ Potassium channel ######################
+
+        # analitical solution for sodium activation variable, spine commpartment
+        m_kdr_sp = m_kdr_sp + (1. - exp(-(timestep())/tau_m_kdr_sp))*(1. / (1. + exp(-(V_spine+42. mV)/2mV)) - m_kdr_sp)
+
+
+        # delay rectifier potassium current
+        I_Kdr_spine = -g_kdr_sp1*m_kdr_sp*m_kdr_sp*(V_spine - E_kdr_sp)
+
+        #Fast Inactivating Potassium Current IA
+        #QA 1/mV =  Faraday/ (R *  (temp-10))
+        QA 1/mV = 39.048 /mV
+        #inline zeta_a real= -1.5 - (1.0)/(1+exp((V_spine+40.0 mV)/(5.0 mV)))#-2,381
+        inline zeta_a real= -2.381
+        inline alpha_m_a real = exp(zeta_a*(V_spine-11.0 mV)*QA/1000.0)
+        inline beta_m_a real = exp(0.00055*zeta_a*(V_spine-11.0 mV)*QA) #8,35
+        inline alpha_h_a real = exp(0.003*(V_spine+56.0 mV)*QA)
+        inline beta_h_a real = alpha_h_a
+        inline q_t_a real= 1.0
+        #inline q_t_a real= 5**((temp-24.0 K-273.15 K)/(10 K))
+        #tau_m_a_sp ms = beta_m_a/(q_t_a*(1+alpha_m_a)*0.05)* ms
+        tau_m_a_sp ms = max(beta_m_a/(q_t_a*(1+alpha_m_a)*0.05)* ms,0.1 ms)
+        tau_h_a_sp ms = max((V_spine+50 mV)*0.26 ms/mV,2.0 ms)
+        m_a_sp = m_a_sp + (1. - exp(-(timestep())/tau_m_a_sp))*(1. / (1.0 + alpha_m_a) - m_a_sp)
+        h_a_sp = h_a_sp + (1. - exp(-(timestep())/tau_h_a_sp))*(1. / (1.0 + alpha_h_a) - h_a_sp)
+        I_A_spine = -gcalbar_a_sp*m_a_sp*h_a_sp*(V_spine - E_a_sp)
+
+        #Potassium Current I_mAHP
+
+        #inline Q1 1/mV =  Faraday/ (R *  (temp-14 K) )
+        inline Q1 1/mV = 39.58085 / mV
+        #inline ca_in real = 1./1000.0
+        #inline alpha_mAHP 1/ms= (0.48 /(1.0 + ((0.18/ca_in)*exp(-1.68*V_spine*Q1*mV)) ))/ms
+        #inline beta_mAHP 1/ms = (0.28 /(1.0 + (ca_in/(0.011*exp(-2*V_spine*Q1*mV))) ))/ms
+        inline alpha_mAHP 1/ms= (0.48 /(1.0 + ((0.18/Ca_spine)*exp(-1.68*V_spine*Q1*mV)) ))/ms
+        inline beta_mAHP 1/ms = (0.28 /(1.0 + (Ca_spine/(0.011*exp(-2*V_spine*Q1*mV))) ))/ms
+        
+        #m_mAHP_sp=beta_mAHP* ms
+        inline tau_m_mAHP_sp ms =  1.0 /(alpha_mAHP+beta_mAHP) # 3.57 ms 
+        m_mAHP_sp = m_mAHP_sp + (1. - exp(-(timestep())/tau_m_mAHP_sp))*(alpha_mAHP*tau_m_mAHP_sp- m_mAHP_sp)
+        I_mAHP_spine = -g_mAHP_sp*m_mAHP_sp*(V_spine - E_mAHP_sp)
+
+
+
+
+
+
+
+        
+
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        # equation for Ca2+ NMDA current, spine compartment
+        #I_Ca_spine_NMDA= QA
+        #I_Ca_spine_NMDA = - g_Ca_NMDA *g_nmda* m_ca_NMDA_sp * ( V_spine - E_Ca_NMDA )
+        I_syn_spine_NMDA = - g_syn_NMDA1 *g_nmda* m_syn_NMDA_sp * ( V_spine- E_syn_NMDA )
+        I_Ca_spine_NMDA = - g_Ca_NMDA *g_nmda* m_ca_NMDA_sp * ( V_spine - E_Ca_NMDA )
+        #I_Ca_spine_NMDA1 = - g_Ca_NMDA *conv_g_exc* m_ca_NMDA_sp * ( V_spine - E_Ca_NMDA )
+
+        # equation for I_ca_soma
+        #I_ca_soma = g_CaL_s * m_soma * ghk
+        
+        
+        integrate_odes()
+    #    if is_refractory:
+    #            # neuron is absolute refractory, decrease refractoriness timer
+    #            refr_t -= timestep()
+
+    #onCondition(not is_refractory and V_spine > V_T + 30mV and V_spine_old > V_spine):
+    #    refr_t = refr_T    # start of the refractory period
+    #    is_refractory = true
+    #    emit_spike()
+
+    #onCondition(is_refractory and refr_t <= timestep() / 2):
+    #    # end of refractory period
+    #    refr_t = 0 ms
+    #    is_refractory = false
